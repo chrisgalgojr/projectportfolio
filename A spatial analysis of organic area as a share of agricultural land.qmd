@@ -17,25 +17,6 @@ execute:
   message: false
 ---
 
-<!--
-READ THIS FIRST
-
-This is your second project. It teaches spatial analysis in R.
-The new ideas are: sf objects, coordinate reference systems (CRS),
-projections, and joining tabular data to geometry.
-
-Two honest warnings from me:
-
-1. I could not run R when I wrote this file, so Eurostat dataset codes
-   and column names may have shifted. Section 2 includes a discovery
-   step that finds the current code. Treat breakage as normal; every
-   analyst debugs API changes.
-
-2. Downloads happen on first render and may take a few minutes.
-
-Render with: quarto render analysis.qmd
--->
-
 ## 1. Business question
 
 The EU Farm to Fork strategy targets 25% of agricultural land under
