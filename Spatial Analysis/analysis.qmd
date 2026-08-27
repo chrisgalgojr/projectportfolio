@@ -1,0 +1,324 @@
+---
+title: "Organic Farming Across Europe"
+subtitle: "A spatial analysis of organic area as a share of agricultural land"
+author: "Christopher Jr Galgo"
+date: today
+format:
+  html:
+    toc: true
+    toc-location: left
+    code-fold: true
+    code-summary: "Show code"
+    theme: flatly
+    fig-width: 8
+    fig-height: 7
+execute:
+  warning: false
+  message: false
+---
+
+<!--
+READ THIS FIRST
+
+This is your second project. It teaches spatial analysis in R.
+The new ideas are: sf objects, coordinate reference systems (CRS),
+projections, and joining tabular data to geometry.
+
+Two honest warnings from me:
+
+1. I could not run R when I wrote this file, so Eurostat dataset codes
+   and column names may have shifted. Section 2 includes a discovery
+   step that finds the current code. Treat breakage as normal; every
+   analyst debugs API changes.
+
+2. Downloads happen on first render and may take a few minutes.
+
+Render with: quarto render analysis.qmd
+-->
+
+## 1. Business question
+
+The EU Farm to Fork strategy targets 25% of agricultural land under
+organic production by 2030. Progress varies widely between member
+states. This analysis asks: **where does organic farming concentrate,
+how fast is each country moving, and which countries will miss the
+target on current trends?**
+
+The spatial dimension matters here. Organic adoption clusters
+geographically, and clusters suggest shared drivers such as policy
+regimes, consumer markets, or agronomic conditions.
+
+## 2. Packages and data discovery
+
+```{r}
+#| label: setup
+
+# One-time install (run in the console, not here):
+# install.packages(c("eurostat", "sf", "giscoR", "tidyverse",
+#                    "scales", "knitr"))
+
+library(eurostat)    # Eurostat data + NUTS boundaries
+library(sf)          # simple features: the standard spatial class in R
+library(tidyverse)
+library(scales)
+library(knitr)
+```
+
+Eurostat retires and renames datasets. Rather than hard-coding a code
+and hoping, find it:
+
+```{r}
+#| label: discover
+#| eval: false
+
+# Set eval: true above to run this once. It searches dataset titles.
+search_eurostat("organic") |>
+  select(title, code) |>
+  head(20)
+```
+
+We use `sdg_02_40`, the SDG indicator for area under organic farming.
+
+```{r}
+#| label: load-data
+
+organic_raw <- get_eurostat("sdg_02_40")
+
+# ALWAYS inspect before filtering. You cannot filter columns you have
+# not looked at.
+glimpse(organic_raw)
+
+# What units and categories does this dataset contain?
+organic_raw |>
+  count(unit) |>
+  kable(caption = "Units available in the dataset")
+```
+
+```{r}
+#| label: normalise
+
+# Defensive step: eurostat renamed its time column across versions.
+# This works either way, and documents the problem for whoever reads
+# your code later.
+time_col <- intersect(c("TIME_PERIOD", "time"), names(organic_raw))[1]
+
+organic <- organic_raw |>
+  rename(year = all_of(time_col)) |>
+  mutate(year = as.integer(format(as.Date(year), "%Y"))) |>
+  filter(unit == "PC_UAA") |>          # percent of utilised agri. area
+  filter(!is.na(values))
+
+# If the unit filter empties the table, the code above is wrong for the
+# current data. Check the unit table printed in the previous chunk.
+cat("Rows retained:", nrow(organic),
+    "| Years:", min(organic$year), "to", max(organic$year), "\n")
+```
+
+## 3. Joining data to geometry
+
+```{r}
+#| label: geometry
+
+# NUTS level 0 = countries. This call uses the copy bundled inside the
+# eurostat package, so it needs no download.
+nuts0 <- get_eurostat_geospatial(
+  output_class = "sf",
+  resolution = "60",
+  nuts_level = 0,
+  year = 2016
+)
+
+# An sf object is a data frame with a geometry column attached.
+# Everything you know from dplyr still works on it.
+class(nuts0)
+```
+
+```{r}
+#| label: join
+
+latest_year <- max(organic$year)
+
+map_data <- nuts0 |>
+  left_join(
+    organic |> filter(year == latest_year),
+    by = "geo"                    # NUTS code, e.g. "FR", "DE"
+  )
+
+# Report the join quality. Silent join failures are the most common
+# error in spatial work, and reviewers look for this check.
+n_matched <- sum(!is.na(map_data$values))
+cat(n_matched, "of", nrow(map_data), "geographies matched.\n")
+```
+
+## 4. Projections
+
+```{r}
+#| label: projection
+
+# Raw NUTS data arrive in EPSG:4326 (longitude/latitude on a sphere).
+# That projection distorts area badly at European latitudes: Finland
+# looks far larger than it is.
+st_crs(map_data)$epsg
+
+# EPSG:3035 (ETRS89-LAEA) is the EU's official equal-area projection.
+# Use it whenever you map Europe. This single line separates maps that
+# look professional from maps that do not.
+map_proj <- st_transform(map_data, crs = 3035)
+```
+
+## 5. Finding 1: Organic farming concentrates in the Alpine and Nordic band
+
+```{r}
+#| label: fig-choropleth
+#| fig-cap: "Organic area as a share of utilised agricultural area"
+
+ggplot(map_proj) +
+  geom_sf(aes(fill = values), colour = "white", linewidth = 0.2) +
+  # Bounding box in projected metres, cropping overseas territories
+  coord_sf(xlim = c(2400000, 6400000), ylim = c(1400000, 5500000)) +
+  scale_fill_viridis_c(
+    option = "viridis", na.value = "grey90",
+    labels = label_number(suffix = "%")
+  ) +
+  labs(
+    title = paste("Organic farming share of agricultural area,",
+                  latest_year),
+    fill = "% of UAA",
+    caption = "Source: Eurostat (sdg_02_40). Grey = no data."
+  ) +
+  theme_void() +
+  theme(legend.position = "right")
+```
+
+Write your own reading of this map here, in two or three sentences.
+Name the leaders, name the laggards, and resist explaining the pattern
+before you have tested it. Description first, interpretation second.
+
+**YOUR TURN 1:** Remove the `st_transform()` line and render again.
+Compare the two maps. Write one sentence on what changed and why it
+matters.
+
+## 6. Finding 2: Distance from the 25% target
+
+```{r}
+#| label: fig-gap
+#| fig-cap: "Gap to the Farm to Fork 2030 target of 25%"
+
+target <- 25
+
+gap <- organic |>
+  filter(year == latest_year, nchar(geo) == 2, geo != "EU27_2020") |>
+  mutate(
+    gap_to_target = target - values,
+    reached = values >= target
+  ) |>
+  arrange(desc(values))
+
+ggplot(gap, aes(x = values, y = reorder(geo, values), fill = reached)) +
+  geom_col() +
+  geom_vline(xintercept = target, linetype = "dashed") +
+  scale_fill_manual(values = c("FALSE" = "#7c9885", "TRUE" = "#2c5f4a"),
+                    guide = "none") +
+  labs(
+    x = "% of utilised agricultural area", y = NULL,
+    title = paste("Most member states sit far below 25% in",
+                  latest_year),
+    caption = "Dashed line: Farm to Fork 2030 target."
+  ) +
+  theme_minimal()
+```
+
+**YOUR TURN 2:** The country codes are hard to read. Use
+`label_eurostat()` from the eurostat package to attach country names,
+then redraw this chart.
+
+## 7. Finding 3: Growth rates, not levels, decide who reaches the target
+
+```{r}
+#| label: fig-trend
+#| fig-cap: "Change in organic share since 2012"
+
+trend <- organic |>
+  filter(nchar(geo) == 2, geo != "EU27_2020",
+         year %in% c(2012, latest_year)) |>
+  select(geo, year, values) |>
+  pivot_wider(names_from = year, values_from = values,
+              names_prefix = "y") |>
+  drop_na() |>
+  mutate(
+    change = .data[[paste0("y", latest_year)]] - y2012,
+    annual_rate = change / (latest_year - 2012)
+  )
+
+ggplot(trend, aes(x = y2012,
+                  y = .data[[paste0("y", latest_year)]])) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted") +
+  geom_point(colour = "#2c5f4a", size = 2.5) +
+  geom_text(aes(label = geo), nudge_y = 0.9, size = 3) +
+  labs(
+    x = "Organic share, 2012 (%)",
+    y = paste0("Organic share, ", latest_year, " (%)"),
+    title = "Countries above the dotted line expanded organic area",
+    caption = "Dotted line: no change."
+  ) +
+  theme_minimal()
+```
+
+A simple linear extrapolation shows how few countries reach 25% by 2030
+on current trends:
+
+```{r}
+#| label: tbl-projection
+
+trend |>
+  mutate(
+    projected_2030 = .data[[paste0("y", latest_year)]] +
+      annual_rate * (2030 - latest_year),
+    reaches_target = if_else(projected_2030 >= 25, "Yes", "No")
+  ) |>
+  arrange(desc(projected_2030)) |>
+  select(geo, annual_rate, projected_2030, reaches_target) |>
+  mutate(across(where(is.numeric), \(x) round(x, 1))) |>
+  head(15) |>
+  kable(col.names = c("Country", "Annual change (pp)",
+                      "Projected 2030 (%)", "Reaches 25%?"))
+```
+
+Linear extrapolation assumes constant growth, which rarely holds.
+Adoption curves usually flatten as the willing early adopters convert.
+Treat these projections as an optimistic ceiling, not a forecast.
+
+## 8. Recommendations
+
+1. **Target the laggards, not the leaders.** Countries already above
+   20% face diminishing returns; the aggregate EU target depends on
+   movement in the large, low-share agricultural economies.
+2. **Study the fast movers.** Countries with steep growth from a low
+   base reveal which policy levers work, and their conditions
+   resemble the laggards' more than the leaders' do.
+3. **Treat the 25% target as aggregate, not uniform.** Agronomic
+   conditions constrain organic conversion; a single national threshold
+   for every member state ignores this.
+
+## 9. Limitations
+
+Eurostat reports certified organic area, which excludes low-input
+practices that deliver similar environmental outcomes without
+certification. Country-level aggregation conceals within-country
+variation; NUTS2 analysis would show more. The projections assume
+linear growth and no policy change. Association between geography and
+adoption does not establish that geography causes adoption; market
+access, subsidy design, and farm size all plausibly confound it.
+
+With more time, I would repeat this at NUTS2 level and test whether
+neighbouring regions correlate more strongly than distant ones, which
+would give the spatial claim statistical support rather than visual
+support alone.
+
+<!--
+STRETCH GOALS (later, with my help):
+1. NUTS2 version using a regional dataset.
+2. A spatial autocorrelation test (Moran's I via the spdep package) to
+   replace "clusters visibly" with a measurable statistic.
+3. Convert to format: dashboard.
+-->
